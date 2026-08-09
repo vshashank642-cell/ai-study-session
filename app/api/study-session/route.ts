@@ -27,14 +27,11 @@ function allowedByRateLimit(key: string) {
 
   recent.push(now);
   requestLog.set(key, recent);
-
-  // Prevent this process-local map from growing forever.
   if (requestLog.size > 5000) {
     for (const [storedKey, timestamps] of requestLog) {
       if (!timestamps.some((timestamp) => now - timestamp < WINDOW_MS)) requestLog.delete(storedKey);
     }
   }
-
   return true;
 }
 
@@ -43,7 +40,6 @@ function fallbackSession(topic: string, minutes: number, goal: string) {
   const practice = Math.max(5, Math.round(minutes * 0.35));
   const test = Math.max(3, Math.round(minutes * 0.2));
   const recall = Math.max(2, minutes - learn - practice - test);
-
   return {
     title: `${topic}: a ${minutes}-minute ${goal.toLowerCase()} session`,
     steps: [
@@ -66,10 +62,7 @@ function parseModelJson(text: string) {
 export async function POST(request: NextRequest) {
   const key = getClientKey(request);
   if (!allowedByRateLimit(key)) {
-    return NextResponse.json(
-      { error: "You have reached the study-session limit for this hour. Please try again later." },
-      { status: 429, headers: { "Retry-After": "3600" } },
-    );
+    return NextResponse.json({ error: "You have reached the study-session limit for this hour. Please try again later." }, { status: 429, headers: { "Retry-After": "3600" } });
   }
 
   let body: { topic?: unknown; level?: unknown; minutes?: unknown; goal?: unknown };
@@ -84,58 +77,39 @@ export async function POST(request: NextRequest) {
   const minutes = typeof body.minutes === "number" ? body.minutes : Number(body.minutes);
   const goal = typeof body.goal === "string" ? body.goal.trim() : "Understand the topic";
 
-  if (!topic || topic.length > MAX_TOPIC_LENGTH) {
-    return NextResponse.json({ error: `Topic must be between 1 and ${MAX_TOPIC_LENGTH} characters.` }, { status: 400 });
-  }
-  if (!Number.isFinite(minutes) || minutes < MIN_MINUTES || minutes > MAX_MINUTES) {
-    return NextResponse.json({ error: `Study time must be between ${MIN_MINUTES} and ${MAX_MINUTES} minutes.` }, { status: 400 });
-  }
+  if (!topic || topic.length > MAX_TOPIC_LENGTH) return NextResponse.json({ error: `Topic must be between 1 and ${MAX_TOPIC_LENGTH} characters.` }, { status: 400 });
+  if (!Number.isFinite(minutes) || minutes < MIN_MINUTES || minutes > MAX_MINUTES) return NextResponse.json({ error: `Study time must be between ${MIN_MINUTES} and ${MAX_MINUTES} minutes.` }, { status: 400 });
 
+  const fallback = fallbackSession(topic, minutes, goal);
   const apiKey = process.env.GEMINI_API_KEY;
-
-  // The app remains usable before the API is configured. Once GEMINI_API_KEY is
-  // added in Vercel, requests automatically use the AI provider.
-  if (!apiKey) {
-    return NextResponse.json({ session: fallbackSession(topic, minutes, goal), mode: "demo" });
-  }
+  if (!apiKey) return NextResponse.json({ session: fallback, mode: "demo" });
 
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const prompt = `You are StudyFlow, an expert study-session designer. Create a realistic, focused study session for a student.\n\nStudent level: ${level}\nTopic: ${topic}\nAvailable time: ${minutes} minutes\nGoal: ${goal}\n\nRules:\n- Fit the complete session inside the available time.\n- Prefer active learning, practice, retrieval, and correction over passive rereading.\n- Be specific to the topic and student level.\n- Return ONLY valid JSON, with no markdown.\n- Use exactly this shape: {"title":"string","steps":[{"time":"string","title":"string","detail":"string"}]}\n- Include 3 to 6 steps.\n- The time fields should be short human-readable durations.\n`;
+  const prompt = `You are StudyFlow, an expert study-session designer. Create a realistic, focused study session for a student.\n\nStudent level: ${level}\nTopic: ${topic}\nAvailable time: ${minutes} minutes\nGoal: ${goal}\n\nRules:\n- Fit the complete session inside the available time.\n- Prefer active learning, practice, retrieval, and correction over passive rereading.\n- Be specific to the topic and student level.\n- Return ONLY valid JSON, with no markdown.\n- Use exactly this shape: {"title":"string","steps":[{"time":"string","title":"string","detail":"string"}]}\n- Include 3 to 6 steps.\n- The time fields should be short human-readable durations.`;
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.5,
-            maxOutputTokens: 1200,
-            responseMimeType: "application/json",
-          },
-        }),
-      },
-    );
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5, maxOutputTokens: 1200, responseMimeType: "application/json" } }),
+    });
 
     if (!response.ok) {
-      console.error("AI provider error", response.status);
-      return NextResponse.json({ error: "The AI service is temporarily unavailable. Please try again shortly." }, { status: 502 });
+      const providerBody = await response.text();
+      console.error("Gemini provider error", response.status, providerBody.slice(0, 500));
+      // Keep the MVP usable if the provider is temporarily unavailable, out of quota,
+      // or the key has not propagated to the latest Vercel deployment yet.
+      return NextResponse.json({ session: fallback, mode: "fallback", aiUnavailable: true });
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (typeof text !== "string") throw new Error("Missing AI response text.");
-
     const session = parseModelJson(text);
-    if (!session?.title || !Array.isArray(session?.steps) || session.steps.length === 0) {
-      throw new Error("Invalid session structure.");
-    }
-
+    if (!session?.title || !Array.isArray(session?.steps) || session.steps.length === 0) throw new Error("Invalid session structure.");
     return NextResponse.json({ session, mode: "ai" });
   } catch (error) {
     console.error("Study session generation failed", error);
-    return NextResponse.json({ error: "We couldn't build your session right now. Please try again." }, { status: 502 });
+    return NextResponse.json({ session: fallback, mode: "fallback", aiUnavailable: true });
   }
 }
