@@ -10,9 +10,8 @@ const MIN_MINUTES = 15;
 const MAX_REQUESTS_PER_WINDOW = 5;
 const WINDOW_MS = 60 * 60 * 1000;
 
-// This is a lightweight MVP guard. It is intentionally supplemented by the
-// persistent Vercel Data Cache below; a durable cross-instance rate limiter
-// should be added with a database/Redis when StudyFlow becomes public at scale.
+// Lightweight MVP guard. A durable cross-instance limiter should be added
+// with a database/Redis when StudyFlow becomes public at larger scale.
 const requestLog = new Map<string, number[]>();
 
 function getClientKey(request: NextRequest) {
@@ -24,12 +23,10 @@ function allowedByRateLimit(key: string) {
   const now = Date.now();
   const existing = requestLog.get(key) ?? [];
   const recent = existing.filter((timestamp) => now - timestamp < WINDOW_MS);
-
   if (recent.length >= MAX_REQUESTS_PER_WINDOW) {
     requestLog.set(key, recent);
     return false;
   }
-
   recent.push(now);
   requestLog.set(key, recent);
   if (requestLog.size > 5000) {
@@ -41,9 +38,7 @@ function allowedByRateLimit(key: string) {
 }
 
 function cacheKey(topic: string, level: string, minutes: number, goal: string) {
-  return createHash("sha256")
-    .update(JSON.stringify({ topic, level, minutes, goal }))
-    .digest("hex");
+  return createHash("sha256").update(JSON.stringify({ topic, level, minutes, goal })).digest("hex");
 }
 
 function fallbackSession(topic: string, minutes: number, goal: string) {
@@ -53,7 +48,6 @@ function fallbackSession(topic: string, minutes: number, goal: string) {
   const practice = Math.max(4, Math.round(minutes * 0.24));
   const test = Math.max(3, Math.round(minutes * 0.16));
   const recap = Math.max(2, minutes - orientation - learn - example - practice - test);
-
   return {
     title: `${topic}: a ${minutes}-minute ${goal.toLowerCase()} session`,
     steps: [
@@ -78,13 +72,10 @@ function parseModelJson(text: string) {
 function validateSession(session: any, minutes: number) {
   if (!session?.title || !Array.isArray(session?.steps) || session.steps.length < 3) return false;
   if (!session.steps.every((step: any) => typeof step?.time === "string" && typeof step?.title === "string" && typeof step?.detail === "string")) return false;
-
   const total = session.steps.reduce((sum: number, step: any) => {
     const match = String(step.time).match(/(\d+(?:\.\d+)?)/);
     return sum + (match ? Number(match[1]) : 0);
   }, 0);
-
-  // Allow a small parsing tolerance, but reject obviously incomplete plans.
   return total >= minutes - 1 && total <= minutes + 1;
 }
 
@@ -93,14 +84,19 @@ async function generateFreshSession(topic: string, level: string, minutes: numbe
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return { session: fallback, mode: "demo" as const };
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  // Gemini 3.5 Flash-Lite is a current stable, cost-efficient model designed
+  // for high-throughput use cases. Keep it overridable for future migrations.
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   const prompt = `You are StudyFlow, an expert study-session designer. Create a genuinely actionable study plan that a student can follow minute-by-minute, not a high-level checklist.\n\nStudent level: ${level}\nTopic: ${topic}\nAvailable time: ${minutes} minutes\nGoal: ${goal}\n\nRules:\n- Use the entire available time; step durations must add up to exactly ${minutes} minutes.\n- Create 5 to 6 distinct phases, unless the short time makes 5 impossible.\n- Include a deliberate progression: orient/diagnose, learn core concepts, work an example, active practice, retrieval/testing, and a final recap when time permits.\n- Be specific to ${topic} and ${level}; avoid generic advice that could apply to any subject.\n- Every step's detail must contain concrete actions the student should perform, what they should produce/write/solve, and a quick way to check whether they understood it. Aim for 2–4 sentences per step.\n- Include active learning, practice, retrieval, and correction rather than passive rereading.\n- Make the plan realistic for the stated time. Do not assign more work than can fit.\n- Return ONLY valid JSON, with no markdown.\n- Use exactly this shape: {"title":"string","steps":[{"time":"string","title":"string","detail":"string"}]}\n- The time fields should be short human-readable durations such as "8 min" or "12 min".`;
 
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5, maxOutputTokens: 1800, responseMimeType: "application/json" } }),
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 1800, responseMimeType: "application/json" },
+      }),
     });
 
     if (!response.ok) {
@@ -121,7 +117,7 @@ async function generateFreshSession(topic: string, level: string, minutes: numbe
   }
 }
 
-// Vercel/Next persistent Data Cache: identical session requests reuse the
+// Persistent Vercel/Next Data Cache: identical session requests reuse the
 // stored result instead of invoking Gemini again. The cache key is derived
 // from normalized session inputs, so unrelated requests remain independent.
 async function getCachedSession(topic: string, level: string, minutes: number, goal: string) {
@@ -141,11 +137,7 @@ export async function POST(request: NextRequest) {
   }
 
   let body: { topic?: unknown; level?: unknown; minutes?: unknown; goal?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Please send valid session details." }, { status: 400 });
-  }
+  try { body = await request.json(); } catch { return NextResponse.json({ error: "Please send valid session details." }, { status: 400 }); }
 
   const topic = typeof body.topic === "string" ? body.topic.trim() : "";
   const level = typeof body.level === "string" ? body.level.trim() : "Class 10";
@@ -159,8 +151,8 @@ export async function POST(request: NextRequest) {
   const normalizedLevel = level || "Class 10";
   const normalizedGoal = goal || "Understand the topic";
   const cacheKeyValue = cacheKey(normalizedTopic, normalizedLevel, minutes, normalizedGoal);
-
   const result = await getCachedSession(normalizedTopic, normalizedLevel, minutes, normalizedGoal);
+
   const response = NextResponse.json(result);
   response.headers.set("X-StudyFlow-Cache-Key", cacheKeyValue);
   response.headers.set("X-StudyFlow-Cache-Strategy", "persistent-session-cache");
