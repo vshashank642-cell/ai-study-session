@@ -6,6 +6,10 @@ type Step = { time: string; title: string; detail: string };
 type Session = { title: string; steps: Step[] };
 const examples = ["Electricity", "Trigonometry", "Carbon compounds"];
 
+function localCacheKey(topic: string, level: string, minutes: string, goal: string) {
+  return `studyflow:session:${JSON.stringify({ topic: topic.trim().replace(/\s+/g, " "), level, minutes, goal })}`;
+}
+
 export default function Home() {
   const [topic, setTopic] = useState("");
   const [level, setLevel] = useState("Class 10");
@@ -14,18 +18,49 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [session, setSession] = useState<Session | null>(null);
+  const [source, setSource] = useState<"local" | "server" | "fallback" | "ai" | "demo" | null>(null);
 
   async function generateSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setError(""); setSession(null);
+    event.preventDefault();
+    setError("");
+    setSession(null);
+    setSource(null);
     if (!topic.trim()) { setError("Tell us what you want to study first."); return; }
+
+    const key = localCacheKey(topic, level, minutes, goal);
+    try {
+      const saved = window.localStorage.getItem(key);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { session?: Session };
+        if (parsed.session?.title && Array.isArray(parsed.session.steps)) {
+          setSession(parsed.session);
+          setSource("local");
+          return;
+        }
+      }
+    } catch {
+      // Local storage is an optimization only; the server remains the source of truth.
+    }
+
     setLoading(true);
     try {
-      const response = await fetch("/api/study-session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ topic: topic.trim(), level, minutes: Number(minutes), goal }) });
+      const response = await fetch("/api/study-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic: topic.trim(), level, minutes: Number(minutes), goal }),
+      });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Something went wrong.");
       setSession(data.session);
-    } catch (err) { setError(err instanceof Error ? err.message : "Something went wrong."); }
-    finally { setLoading(false); }
+      setSource(data.mode || "server");
+      try {
+        window.localStorage.setItem(key, JSON.stringify({ session: data.session, savedAt: Date.now() }));
+      } catch {
+        // Ignore browser storage quota/privacy restrictions.
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally { setLoading(false); }
   }
 
   return (
@@ -67,7 +102,7 @@ export default function Home() {
         </div>
       </section>
 
-      {session && <section className="result-wrap"><div className="result-card"><div className="result-header"><div><div className="eyebrow">YOUR SESSION</div><h2>{session.title}</h2></div><div className="result-badge">AI planned</div></div><div className="session-list">{session.steps.map((step, index) => <div className="session-step" key={`${step.title}-${index}`}><div className="step-index">{String(index + 1).padStart(2, "0")}</div><div className="step-time">{step.time}</div><div><div className="step-title">{step.title}</div><div className="step-detail">{step.detail}</div></div></div>)}</div></div></section>}
+      {session && <section className="result-wrap"><div className="result-card"><div className="result-header"><div><div className="eyebrow">YOUR SESSION</div><h2>{session.title}</h2></div><div className="result-badge">{source === "local" ? "Saved locally" : source === "fallback" ? "Offline-safe plan" : source === "demo" ? "Demo plan" : "AI planned"}</div></div><div className="session-list">{session.steps.map((step, index) => <div className="session-step" key={`${step.title}-${index}`}><div className="step-index">{String(index + 1).padStart(2, "0")}</div><div className="step-time">{step.time}</div><div><div className="step-title">{step.title}</div><div className="step-detail">{step.detail}</div></div></div>)}</div></div></section>}
       <footer className="footer"><div><strong>StudyFlow</strong> · AI-powered focused study sessions</div><div>Built to help students spend less time planning and more time learning.</div></footer>
     </main>
   );
