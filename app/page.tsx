@@ -1,109 +1,49 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type Step = { time: string; title: string; detail: string };
 type Session = { title: string; steps: Step[] };
-const examples = ["Electricity", "Trigonometry", "Carbon compounds"];
+type Saved = { id:string; topic:string; level:string; minutes:number; goal:string; session:Session; createdAt:number; progress:number; completed:boolean; currentStep:number; secondsSpent:number };
+type Tab = "home"|"recents"|"history"|"progress"|"settings";
 
-function localCacheKey(topic: string, level: string, minutes: string, goal: string) {
-  return `studyflow:session:${JSON.stringify({ topic: topic.trim().replace(/\s+/g, " "), level, minutes, goal })}`;
+const STORE="studyflow:sessions:v2";
+const SETTINGS="studyflow:settings:v1";
+const examples=["Electricity","Trigonometry","Carbon compounds"];
+const clean=(s:string)=>s.trim().replace(/\s+/g," ");
+const key=(t:string,l:string,m:string,g:string)=>`studyflow:session:${JSON.stringify({topic:clean(t),level:l,minutes:m,goal:g})}`;
+function read():Saved[]{try{return JSON.parse(localStorage.getItem(STORE)||"[]")}catch{return []}}
+function Stat({label,value}:{label:string,value:string}){return <div className="stat-card"><span>{label}</span><strong>{value}</strong></div>}
+
+function Library({title,subtitle,items,search,setSearch,onOpen,onDelete}:{title:string;subtitle:string;items:Saved[];search:string;setSearch:(v:string)=>void;onOpen:(x:Saved)=>void;onDelete:(id:string)=>void}){
+ return <section className="page-section"><div className="page-title"><div><div className="eyebrow">STUDY LIBRARY</div><h1>{title}</h1><p>{subtitle}</p></div><input className="search-input" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search sessions…"/></div>{items.length?<div className="library-list">{items.map(x=><article className="library-item" key={x.id}><button className="library-main" onClick={()=>onOpen(x)}><div className="library-icon">{x.completed?"✓":"→"}</div><div><strong>{x.topic}</strong><span>{x.level} · {x.minutes} min · {x.goal}</span><small>{new Date(x.createdAt).toLocaleString()}</small></div></button><div className="library-actions"><span>{x.progress}%</span><button onClick={()=>onDelete(x.id)}>Delete</button></div></article>)}</div>:<div className="empty-card">No sessions found. Create a study session to get started.</div>}</section>
 }
 
-export default function Home() {
-  const [topic, setTopic] = useState("");
-  const [level, setLevel] = useState("Class 10");
-  const [minutes, setMinutes] = useState("45");
-  const [goal, setGoal] = useState("Understand the topic");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [session, setSession] = useState<Session | null>(null);
-  const [source, setSource] = useState<"local" | "server" | "fallback" | "ai" | "demo" | null>(null);
-
-  async function generateSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
-    setSession(null);
-    setSource(null);
-    if (!topic.trim()) { setError("Tell us what you want to study first."); return; }
-
-    const key = localCacheKey(topic, level, minutes, goal);
-    try {
-      const saved = window.localStorage.getItem(key);
-      if (saved) {
-        const parsed = JSON.parse(saved) as { session?: Session };
-        if (parsed.session?.title && Array.isArray(parsed.session.steps)) {
-          setSession(parsed.session);
-          setSource("local");
-          return;
-        }
-      }
-    } catch {
-      // Local storage is an optimization only; the server remains the source of truth.
-    }
-
-    setLoading(true);
-    try {
-      const response = await fetch("/api/study-session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic.trim(), level, minutes: Number(minutes), goal }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Something went wrong.");
-      setSession(data.session);
-      setSource(data.mode || "server");
-      try {
-        window.localStorage.setItem(key, JSON.stringify({ session: data.session, savedAt: Date.now() }));
-      } catch {
-        // Ignore browser storage quota/privacy restrictions.
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
-    } finally { setLoading(false); }
-  }
-
-  return (
-    <main className="page-shell">
-      <div className="ambient ambient-one" /><div className="ambient ambient-two" />
-      <nav className="navbar">
-        <div className="brand"><div className="brand-mark">S</div><div><div className="brand-name">StudyFlow</div><div className="brand-caption">AI study sessions</div></div></div>
-        <div className="nav-pill"><span className="live-dot" /> Built for focused learning</div>
-      </nav>
-
-      <section className="hero">
-        <div className="hero-copy-block">
-          <div className="eyebrow"><span>✦</span> Your next study session</div>
-          <h1>Make the next <em>45 minutes</em> count.</h1>
-          <p className="hero-copy">Stop wondering what to study next. Give StudyFlow a topic, your time, and your goal — and get a focused AI session built around <strong>learning, practice, testing, and recall.</strong></p>
-          <div className="mini-proof"><div className="avatars"><span>✦</span><span>✓</span><span>→</span></div><div><strong>Less planning. More learning.</strong><small>Designed for the session you have right now.</small></div></div>
-        </div>
-
-        <form className="planner-card" onSubmit={generateSession}>
-          <div className="card-topline"><span className="spark">✦</span><span>BUILD A SESSION</span></div>
-          <h2 className="card-title">What are you studying?</h2><p className="card-subtitle">One topic is enough. StudyFlow handles the structure.</p>
-          <div className="field"><label htmlFor="topic">Topic</label><input id="topic" value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="e.g. Electricity — Ohm's law" maxLength={200} autoComplete="off" /><div className="example-row">{examples.map((example) => <button type="button" key={example} onClick={() => setTopic(example)}>{example}</button>)}</div></div>
-          <div className="form-two-col">
-            <div className="field"><label htmlFor="level">Level</label><select id="level" value={level} onChange={(e) => setLevel(e.target.value)}><option>Class 8</option><option>Class 9</option><option>Class 10</option><option>Class 11</option><option>Class 12</option><option>College</option><option>Other</option></select></div>
-            <div className="field"><label htmlFor="minutes">Time available</label><select id="minutes" value={minutes} onChange={(e) => setMinutes(e.target.value)}><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60">1 hour</option><option value="90">90 minutes</option><option value="120">2 hours</option></select></div>
-          </div>
-          <div className="field"><label htmlFor="goal">What do you want to accomplish?</label><select id="goal" value={goal} onChange={(e) => setGoal(e.target.value)}><option>Understand the topic</option><option>Prepare for a test</option><option>Practice problems</option><option>Revise quickly</option></select></div>
-          <button className="primary-button" type="submit" disabled={loading}><span>{loading ? "Building your session…" : "Build my session"}</span><span className="button-arrow">→</span></button>
-          {error && <div className="result-error" role="alert">{error}</div>}
-          <div className="privacy-note"><span>●</span> No account needed to try the MVP.</div>
-        </form>
-      </section>
-
-      <section className="process-section"><div className="section-heading"><span className="eyebrow">HOW IT WORKS</span><h2>A study session with a purpose.</h2></div>
-        <div className="process-grid">
-          <div className="process-card"><div className="process-number">01</div><div className="process-icon">◒</div><h3>Learn</h3><p>Start with the concepts that matter most for your goal.</p></div>
-          <div className="process-card featured"><div className="process-number">02</div><div className="process-icon">✦</div><h3>Practice</h3><p>Turn understanding into ability with targeted practice.</p></div>
-          <div className="process-card"><div className="process-number">03</div><div className="process-icon">✓</div><h3>Recall</h3><p>Finish by checking what actually stayed in your memory.</p></div>
-        </div>
-      </section>
-
-      {session && <section className="result-wrap"><div className="result-card"><div className="result-header"><div><div className="eyebrow">YOUR SESSION</div><h2>{session.title}</h2></div><div className="result-badge">{source === "local" ? "Saved locally" : source === "fallback" ? "Offline-safe plan" : source === "demo" ? "Demo plan" : "AI planned"}</div></div><div className="session-list">{session.steps.map((step, index) => <div className="session-step" key={`${step.title}-${index}`}><div className="step-index">{String(index + 1).padStart(2, "0")}</div><div className="step-time">{step.time}</div><div><div className="step-title">{step.title}</div><div className="step-detail">{step.detail}</div></div></div>)}</div></div></section>}
-      <footer className="footer"><div><strong>StudyFlow</strong> · AI-powered focused study sessions</div><div>Built to help students spend less time planning and more time learning.</div></footer>
-    </main>
-  );
+export default function Home(){
+ const [tab,setTab]=useState<Tab>("home"); const [topic,setTopic]=useState(""); const [level,setLevel]=useState("Class 10"); const [minutes,setMinutes]=useState("45"); const [goal,setGoal]=useState("Understand the topic");
+ const [loading,setLoading]=useState(false); const [error,setError]=useState(""); const [session,setSession]=useState<Session|null>(null); const [saved,setSaved]=useState<Saved[]>([]); const [activeId,setActiveId]=useState<string|null>(null); const [step,setStep]=useState(0); const [seconds,setSeconds]=useState(0); const [running,setRunning]=useState(false); const [search,setSearch]=useState(""); const [dark,setDark]=useState(false); const [toast,setToast]=useState(""); const [source,setSource]=useState("");
+ useEffect(()=>{setSaved(read());try{setDark(localStorage.getItem(SETTINGS)==="dark")}catch{}},[]);
+ useEffect(()=>{document.documentElement.dataset.theme=dark?"dark":"light";try{localStorage.setItem(SETTINGS,dark?"dark":"light")}catch{}},[dark]);
+ useEffect(()=>{if(!running)return;const id=window.setInterval(()=>setSeconds(s=>s+1),1000);return()=>clearInterval(id)},[running]);
+ useEffect(()=>{if(!activeId||!session)return;const id=window.setInterval(()=>persist(),4000);return()=>clearInterval(id)},[activeId,step,seconds,session]);
+ function persist(extra:Partial<Saved>={}){if(!activeId||!session)return;const all=read();const next=all.map(x=>x.id===activeId?{...x,session,currentStep:step,secondsSpent:seconds,progress:Math.min(100,Math.round(((step+1)/session.steps.length)*100)),...extra}:x);try{localStorage.setItem(STORE,JSON.stringify(next));setSaved(next)}catch{}}
+ function notify(s:string){setToast(s);window.setTimeout(()=>setToast(""),2200)}
+ async function generate(e:FormEvent){e.preventDefault();setError("");if(!clean(topic)){setError("Tell us what you want to study first.");return}const k=key(topic,level,minutes,goal);try{const cached=localStorage.getItem(k);if(cached){const d=JSON.parse(cached);if(d.session){start(d.session,"local");return}}}catch{}setLoading(true);try{const r=await fetch("/api/study-session",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({topic:clean(topic),level,minutes:Number(minutes),goal})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Something went wrong.");try{localStorage.setItem(k,JSON.stringify({session:d.session,savedAt:Date.now()}))}catch{}start(d.session,d.mode||"ai")}catch(err){setError(err instanceof Error?err.message:"Something went wrong.")}finally{setLoading(false)}}
+ function start(s:Session,mode:string){const item:Saved={id:crypto.randomUUID(),topic:clean(topic)||s.title,level,minutes:Number(minutes),goal,session:s,createdAt:Date.now(),progress:0,completed:false,currentStep:0,secondsSpent:0};const next=[item,...read().filter(x=>!(x.topic===item.topic&&x.level===item.level&&x.minutes===item.minutes&&x.goal===item.goal))].slice(0,50);localStorage.setItem(STORE,JSON.stringify(next));setSaved(next);setSession(s);setActiveId(item.id);setStep(0);setSeconds(0);setSource(mode);setRunning(false);setTab("home")}
+ function open(x:Saved){setSession(x.session);setActiveId(x.id);setTopic(x.topic);setLevel(x.level);setMinutes(String(x.minutes));setGoal(x.goal);setStep(Math.min(x.currentStep,x.session.steps.length-1));setSeconds(x.secondsSpent);setSource("saved");setRunning(false);setTab("home")}
+ function complete(){persist({progress:100,completed:true,currentStep:session?.steps.length||step});setRunning(false);notify("Session completed — great work.")}
+ function next(){if(!session)return;if(step>=session.steps.length-1){complete();return}setStep(s=>s+1)}
+ function remove(id:string){const next=read().filter(x=>x.id!==id);localStorage.setItem(STORE,JSON.stringify(next));setSaved(next);if(id===activeId){setSession(null);setActiveId(null)}notify("Session deleted.")}
+ const recent=saved.slice(0,6), filtered=useMemo(()=>saved.filter(x=>`${x.topic} ${x.level} ${x.goal}`.toLowerCase().includes(search.toLowerCase())),[saved,search]); const completed=saved.filter(x=>x.completed).length; const total=Math.round(saved.reduce((a,x)=>a+x.secondsSpent,0)/60); const avg=saved.length?Math.round(saved.reduce((a,x)=>a+x.progress,0)/saved.length):0; const active=session?.steps[step];
+ const nav=(t:Tab)=><button className={tab===t?"nav-link active":"nav-link"} onClick={()=>setTab(t)}>{t[0].toUpperCase()+t.slice(1)}</button>;
+ return <main className="app-shell">
+  <nav className="navbar"><button className="brand" onClick={()=>{setTab("home");setSession(null)}}><div className="brand-mark">S</div><div><div className="brand-name">StudyFlow</div><div className="brand-caption">AI study sessions</div></div></button><div className="desktop-nav">{nav("home")}{nav("recents")}{nav("history")}{nav("progress")}{nav("settings")}</div><button className="new-session-top" onClick={()=>{setTab("home");setSession(null);setActiveId(null)}}>+ New session</button></nav>
+  <div className="mobile-nav">{(["home","recents","history","progress","settings"] as Tab[]).map(t=><button key={t} className={tab===t?"mobile-link active":"mobile-link"} onClick={()=>setTab(t)}>{t}<small>{t==="home"?"⌂":t==="recents"?"◷":t==="history"?"▤":t==="progress"?"↗":"⚙"}</small></button>)}</div>
+  {tab==="home"&&(!session?<><section className="hero"><div className="hero-copy-block"><div className="eyebrow">✦ YOUR NEXT STUDY SESSION</div><h1>Make the next <em>45 minutes</em> count.</h1><p className="hero-copy">Give StudyFlow a topic, your time, and your goal — and get a focused AI session built around <strong>learning, practice, testing, and recall.</strong></p><div className="mini-proof"><span className="proof-mark">✓</span><div><strong>Less planning. More learning.</strong><small>Sessions are saved so you can continue later.</small></div></div></div><form className="planner-card" onSubmit={generate}><div className="card-topline">✦ BUILD A SESSION</div><h2 className="card-title">What are you studying?</h2><p className="card-subtitle">One topic is enough. StudyFlow handles the structure.</p><div className="field"><label>Topic</label><input value={topic} onChange={e=>setTopic(e.target.value)} placeholder="e.g. Electricity — Ohm's law" maxLength={200}/><div className="example-row">{examples.map(x=><button type="button" key={x} onClick={()=>setTopic(x)}>{x}</button>)}</div></div><div className="form-two-col"><div className="field"><label>Level</label><select value={level} onChange={e=>setLevel(e.target.value)}>{[8,9,10,11,12].map(x=><option key={x}>Class {x}</option>)}<option>College</option><option>Other</option></select></div><div className="field"><label>Time available</label><select value={minutes} onChange={e=>setMinutes(e.target.value)}>{[15,30,45,60,90,120].map(x=><option value={x} key={x}>{x===60?"1 hour":`${x} minutes`}</option>)}</select></div></div><div className="field"><label>What do you want to accomplish?</label><select value={goal} onChange={e=>setGoal(e.target.value)}><option>Understand the topic</option><option>Prepare for a test</option><option>Practice problems</option><option>Revise quickly</option></select></div><button className="primary-button" disabled={loading}><span>{loading?"Building your session…":"Build my session"}</span><span>→</span></button>{error&&<div className="result-error" role="alert">{error}</div>}<div className="privacy-note">● No account needed for the MVP · saved on this device</div></form></section><section className="process-section"><div className="section-heading"><span className="eyebrow">HOW IT WORKS</span><h2>A study session with a purpose.</h2></div><div className="process-grid"><div className="process-card"><div className="process-number">01</div><div className="process-icon">◒</div><h3>Learn</h3><p>Build the essential concepts for your goal.</p></div><div className="process-card featured"><div className="process-number">02</div><div className="process-icon">✦</div><h3>Practice</h3><p>Turn understanding into targeted practice.</p></div><div className="process-card"><div className="process-number">03</div><div className="process-icon">✓</div><h3>Recall</h3><p>Finish by checking what actually stayed in memory.</p></div></div></section><section className="recent-strip"><div className="section-heading left"><span className="eyebrow">RECENTS</span><h2>Pick up where you left off.</h2></div>{recent.length?<div className="recent-grid">{recent.map(x=><button className="recent-card" key={x.id} onClick={()=>open(x)}><div><span>{x.topic}</span><small>{x.level} · {x.minutes} min</small></div><strong>{x.progress}%</strong></button>)}</div>:<div className="empty-card">Your recent sessions will appear here after your first session.</div>}</section></>:<section className="workspace"><div className="workspace-top"><button className="back-link" onClick={()=>setSession(null)}>← Back to planner</button><span className="result-badge">{source==="local"?"Cached locally":source==="saved"?"Saved session":source==="fallback"?"Offline-safe plan":"AI planned"}</span></div><div className="session-layout"><article className="active-session"><div className="session-heading"><div><div className="eyebrow">FOCUSED SESSION</div><h2>{session.title}</h2><p>{topic} · {minutes} minutes · {goal}</p></div><button className="secondary-button" onClick={()=>setRunning(!running)}>{running?"Pause timer":"Start timer"}</button></div><div className="progress-track"><span style={{width:`${Math.round(((step+1)/session.steps.length)*100)}%`}}/></div><div className="session-meta"><span>Step {step+1} of {session.steps.length}</span><span>{String(Math.floor(seconds/60)).padStart(2,"0")}:{String(seconds%60).padStart(2,"0")} spent</span></div>{active&&<div className="focus-card"><div className="step-kicker">{active.time}</div><h3>{active.title}</h3><p>{active.detail}</p><div className="focus-actions"><button className="secondary-button" onClick={()=>setStep(s=>Math.max(0,s-1))}>Previous</button><button className="primary-small" onClick={next}>{step===session.steps.length-1?"Finish session":"Complete & next →"}</button></div></div>}<div className="timeline">{session.steps.map((x,i)=><button key={i} className={`timeline-item ${i===step?"current":""} ${i<step?"done":""}`} onClick={()=>setStep(i)}><span>{i<step?"✓":String(i+1).padStart(2,"0")}</span><div><strong>{x.title}</strong><small>{x.time}</small></div></button>)}</div></article><aside className="session-sidebar"><div className="side-card"><div className="eyebrow">SESSION STATUS</div><div className="big-stat">{Math.round(((step+1)/session.steps.length)*100)}%</div><p>Progress is saved automatically on this device.</p><button className="success-button" onClick={complete}>Mark session complete</button></div><div className="side-card"><div className="eyebrow">API-SAVING DESIGN</div><strong>Generate once. Reuse many times.</strong><p>Opening this session, using the timer, and updating progress do not require another AI call.</p></div></aside></div></section>)}
+  {tab==="recents"&&<Library title="Recents" subtitle="Recently created or continued sessions." items={recent} search={search} setSearch={setSearch} onOpen={open} onDelete={remove}/>} 
+  {tab==="history"&&<Library title="History" subtitle="All saved sessions on this device." items={filtered} search={search} setSearch={setSearch} onOpen={open} onDelete={remove}/>} 
+  {tab==="progress"&&<section className="page-section"><div className="page-title"><div><div className="eyebrow">YOUR PROGRESS</div><h1>See your study momentum.</h1><p>Basic MVP analytics from saved sessions.</p></div></div><div className="stats-grid"><Stat label="Sessions" value={String(saved.length)}/><Stat label="Completed" value={String(completed)}/><Stat label="Study time" value={`${total} min`}/><Stat label="Avg. progress" value={`${avg}%`}/></div><div className="insight-card"><div className="eyebrow">NEXT STAGE</div><h2>Learning analytics comes after persistent accounts.</h2><p>The current MVP tracks local study activity. Production analytics, retention, AI economics, and cross-device progress belong in the persistent backend once accounts/database infrastructure is added.</p></div></section>}
+  {tab==="settings"&&<section className="page-section narrow"><div className="page-title"><div><div className="eyebrow">SETTINGS</div><h1>Make StudyFlow yours.</h1><p>MVP preferences are stored locally.</p></div></div><div className="settings-card"><div className="setting-row"><div><strong>Appearance</strong><span>Light or dark mode.</span></div><button className="toggle" onClick={()=>setDark(!dark)}>{dark?"Dark":"Light"}</button></div><div className="setting-row"><div><strong>Saved sessions</strong><span>{saved.length} stored on this device.</span></div><button className="danger-button" onClick={()=>{localStorage.removeItem(STORE);setSaved([]);setSession(null);setActiveId(null);notify("Local sessions cleared.")}}>Clear data</button></div><div className="setting-note">Cloud accounts, cross-device sync, notifications, uploads and billing are intentionally deferred until the production database/auth layer is added.</div></div></section>}
+  <footer className="footer"><div><strong>StudyFlow</strong> · AI-powered focused study sessions</div><div>Less planning. More learning.</div></footer>{toast&&<div className="toast">✓ {toast}</div>}
+ </main>
 }
