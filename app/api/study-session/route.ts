@@ -36,17 +36,48 @@ function allowedByRateLimit(key: string) {
 }
 
 function fallbackSession(topic: string, minutes: number, goal: string) {
-  const learn = Math.max(5, Math.round(minutes * 0.25));
-  const practice = Math.max(5, Math.round(minutes * 0.35));
-  const test = Math.max(3, Math.round(minutes * 0.2));
-  const recall = Math.max(2, minutes - learn - practice - test);
+  // Give the fallback the same depth we expect from the AI path so a provider outage
+  // never turns the product into a four-line checklist.
+  const orientation = Math.max(2, Math.round(minutes * 0.1));
+  const learn = Math.max(4, Math.round(minutes * 0.22));
+  const example = Math.max(3, Math.round(minutes * 0.16));
+  const practice = Math.max(4, Math.round(minutes * 0.24));
+  const test = Math.max(3, Math.round(minutes * 0.16));
+  const recap = Math.max(2, minutes - orientation - learn - example - practice - test);
+
   return {
     title: `${topic}: a ${minutes}-minute ${goal.toLowerCase()} session`,
     steps: [
-      { time: `${learn} min`, title: "Learn the essentials", detail: `Identify the 3–5 ideas you must understand about ${topic}. Write a one-sentence explanation for each in your own words.` },
-      { time: `${practice} min`, title: "Practice actively", detail: `Work through targeted questions on ${topic}. Start without notes, then use your notes only when you get stuck.` },
-      { time: `${test} min`, title: "Test yourself", detail: `Close your notes and answer a few questions from memory. Mark every uncertain answer instead of guessing silently.` },
-      { time: `${recall} min`, title: "Finish with recall", detail: `Explain ${topic} aloud as if teaching someone younger. List one remaining weak point to revisit later.` },
+      {
+        time: `${orientation} min`,
+        title: "Set the target",
+        detail: `Write one sentence describing what you need to be able to do with ${topic} by the end. Skim your notes or textbook headings for 60–90 seconds, then list the 2–3 parts you are least confident about. Finish by choosing one concrete question you want this session to answer.`,
+      },
+      {
+        time: `${learn} min`,
+        title: "Build the core understanding",
+        detail: `Study only the essential ideas behind ${topic}. For each key concept, write: (1) what it means, (2) the rule/formula/process involved, and (3) one simple example. After each idea, close your notes and explain it in your own words before moving on.`,
+      },
+      {
+        time: `${example} min`,
+        title: "Work through an example",
+        detail: `Choose one representative ${topic} problem or example. Attempt it before looking at the solution. Then compare your work line by line, identify the first mistake or missing idea, and write a short “why this step works” note.`,
+      },
+      {
+        time: `${practice} min`,
+        title: "Practice without support",
+        detail: `Complete 2–4 targeted questions on ${topic}, starting with a straightforward one and then increasing the difficulty. Keep your notes closed for the first attempt. For every mistake, record the concept tested, what you did, and the correction you should remember next time.`,
+      },
+      {
+        time: `${test} min`,
+        title: "Retrieve and test yourself",
+        detail: `Close everything and answer 3–5 quick questions from memory: define the key idea, state the main rule/formula, explain when to use it, and solve one short application. Mark answers as confident or uncertain instead of checking immediately.`,
+      },
+      {
+        time: `${recap} min`,
+        title: "Lock it in",
+        detail: `Give a 60-second explanation of ${topic} without notes. Write the three most important takeaways, one mistake you made, and one weak point to revisit. End by writing the exact next action for your next study session.`,
+      },
     ],
   };
 }
@@ -85,20 +116,18 @@ export async function POST(request: NextRequest) {
   if (!apiKey) return NextResponse.json({ session: fallback, mode: "demo" });
 
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const prompt = `You are StudyFlow, an expert study-session designer. Create a realistic, focused study session for a student.\n\nStudent level: ${level}\nTopic: ${topic}\nAvailable time: ${minutes} minutes\nGoal: ${goal}\n\nRules:\n- Fit the complete session inside the available time.\n- Prefer active learning, practice, retrieval, and correction over passive rereading.\n- Be specific to the topic and student level.\n- Return ONLY valid JSON, with no markdown.\n- Use exactly this shape: {"title":"string","steps":[{"time":"string","title":"string","detail":"string"}]}\n- Include 3 to 6 steps.\n- The time fields should be short human-readable durations.`;
+  const prompt = `You are StudyFlow, an expert study-session designer. Create a genuinely actionable study plan that a student can follow minute-by-minute, not a high-level checklist.\n\nStudent level: ${level}\nTopic: ${topic}\nAvailable time: ${minutes} minutes\nGoal: ${goal}\n\nRules:\n- Use the entire available time; step durations must add up to exactly ${minutes} minutes.\n- Create 5 to 6 distinct phases, unless the short time makes 5 impossible.\n- Include a deliberate progression: orient/diagnose, learn core concepts, work an example, active practice, retrieval/testing, and a final recap when time permits.\n- Be specific to ${topic} and ${level}; avoid generic advice that could apply to any subject.\n- Every step's detail must contain concrete actions the student should perform, what they should produce/write/solve, and a quick way to check whether they understood it. Aim for 2–4 sentences per step.\n- Include active learning, practice, retrieval, and correction rather than passive rereading.\n- Make the plan realistic for the stated time. Do not assign more work than can fit.\n- Return ONLY valid JSON, with no markdown.\n- Use exactly this shape: {"title":"string","steps":[{"time":"string","title":"string","detail":"string"}]}\n- The time fields should be short human-readable durations such as "8 min" or "12 min".`;
 
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5, maxOutputTokens: 1200, responseMimeType: "application/json" } }),
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.5, maxOutputTokens: 1800, responseMimeType: "application/json" } }),
     });
 
     if (!response.ok) {
       const providerBody = await response.text();
       console.error("Gemini provider error", response.status, providerBody.slice(0, 500));
-      // Keep the MVP usable if the provider is temporarily unavailable, out of quota,
-      // or the key has not propagated to the latest Vercel deployment yet.
       return NextResponse.json({ session: fallback, mode: "fallback", aiUnavailable: true });
     }
 
@@ -106,7 +135,7 @@ export async function POST(request: NextRequest) {
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (typeof text !== "string") throw new Error("Missing AI response text.");
     const session = parseModelJson(text);
-    if (!session?.title || !Array.isArray(session?.steps) || session.steps.length === 0) throw new Error("Invalid session structure.");
+    if (!session?.title || !Array.isArray(session?.steps) || session.steps.length < 3) throw new Error("Invalid session structure.");
     return NextResponse.json({ session, mode: "ai" });
   } catch (error) {
     console.error("Study session generation failed", error);
